@@ -149,6 +149,38 @@ jobs:
         run: choco install innosetup -y --no-progress
         shell: cmd
 
+      # ---- 安装中文语言包（Inno Setup 官方非官方 Languages/Unofficial/ChineseSimplified.isl）----
+      - name: Install Inno Setup Chinese language file
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "C:\Program Files (x86)\Inno Setup 6",
+            "C:\Program Files\Inno Setup 6"
+          )
+          $base = $null
+          foreach ($c in $candidates) { if (Test-Path $c) { $base = $c; break } }
+          if (-not $base) { throw "Inno Setup 6 install dir not found" }
+          $dest = Join-Path $base "Languages\ChineseSimplified.isl"
+          $urls = @(
+            "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl",
+            "https://raw.githubusercontent.com/jrsoftware/issrc/master/Files/Languages/Unofficial/ChineseSimplified.isl"
+          )
+          $ok = $false
+          foreach ($u in $urls) {
+            for ($i = 1; $i -le 5; $i++) {
+              try {
+                Invoke-WebRequest -Uri $u -OutFile $dest -UseBasicParsing -TimeoutSec 60
+                if ((Get-Item $dest -ErrorAction SilentlyContinue).Length -gt 1000) { $ok = $true; break }
+              } catch {
+                Write-Host "Attempt $i from $u failed: $_"
+                Start-Sleep -Seconds 5
+              }
+            }
+            if ($ok) { break }
+          }
+          if (-not $ok) { throw "Cannot download ChineseSimplified.isl" }
+          Get-Item $dest | Select-Object FullName, Length
+
       # ---- 编译 .iss ----
       - name: Compile Inno Setup
         shell: pwsh
