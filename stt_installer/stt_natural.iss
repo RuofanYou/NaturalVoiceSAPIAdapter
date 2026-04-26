@@ -102,11 +102,11 @@ end;
 // ---- 从 PATH 字符串里删掉所有含 needle 的段 ----
 function StripPathSegments(const PathStr, Needle: string): string;
 var
-  Remain, Seg, Out: string;
+  Remain, Seg, OutStr: string;
   P: Integer;
 begin
   Remain := PathStr;
-  Out := '';
+  OutStr := '';
   while Length(Remain) > 0 do
   begin
     P := Pos(';', Remain);
@@ -122,12 +122,12 @@ begin
     end;
     if (Length(Seg) > 0) and (not ContainsText(Seg, Needle)) then
     begin
-      if Length(Out) > 0 then
-        Out := Out + ';';
-      Out := Out + Seg;
+      if Length(OutStr) > 0 then
+        OutStr := OutStr + ';';
+      OutStr := OutStr + Seg;
     end;
   end;
-  Result := Out;
+  Result := OutStr;
 end;
 
 // ---- 系统 PATH 清理 ----
