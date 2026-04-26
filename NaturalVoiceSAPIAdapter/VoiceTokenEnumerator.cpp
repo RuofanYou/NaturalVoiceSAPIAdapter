@@ -12,6 +12,43 @@
 #include "RegKey.h"
 #include "SapiException.h"
 #include "Logger.h"
+#include <unordered_map>
+
+
+// === STT 中文 voice 过滤与中文显示名映射 ===
+// 仅保留中文 voice，所有其它 locale 一律过滤；中文 voice 用我们指定的中文友好名替换。
+struct ZhVoiceLabel { const wchar_t* longName; const wchar_t* shortName; };
+
+// 本地（嵌入式神经语音）：zh-CN 区域目前微软官方只提供 Xiaoxiao 一个离线包。
+static const std::unordered_map<std::string, ZhVoiceLabel>& GetSttLocalZhMap()
+{
+    static const std::unordered_map<std::string, ZhVoiceLabel> m = {
+        { "zh-CN-XiaoxiaoNeural", { L"晓晓 离线 - 普通话女声·新闻播报", L"晓晓 离线" } },
+    };
+    return m;
+}
+
+// Edge online 中文 voice 列表（含普通话、辽宁话、陕西话、粤语、台普）。
+static const std::unordered_map<std::string, ZhVoiceLabel>& GetSttEdgeZhMap()
+{
+    static const std::unordered_map<std::string, ZhVoiceLabel> m = {
+        { "zh-CN-XiaoxiaoNeural",          { L"晓晓 联网 - 普通话女声·新闻", L"晓晓 联网" } },
+        { "zh-CN-XiaoyiNeural",            { L"晓伊 联网 - 普通话女声·活泼", L"晓伊 联网" } },
+        { "zh-CN-YunjianNeural",           { L"云健 联网 - 普通话男声·激情", L"云健 联网" } },
+        { "zh-CN-YunxiNeural",             { L"云希 联网 - 普通话男声·阳光", L"云希 联网" } },
+        { "zh-CN-YunxiaNeural",            { L"云夏 联网 - 普通话男声·萌系", L"云夏 联网" } },
+        { "zh-CN-YunyangNeural",           { L"云扬 联网 - 普通话男声·主播", L"云扬 联网" } },
+        { "zh-CN-liaoning-XiaobeiNeural",  { L"小贝 联网 - 辽宁话女声", L"小贝 辽宁话" } },
+        { "zh-CN-shaanxi-XiaoniNeural",    { L"小妮 联网 - 陕西话女声", L"小妮 陕西话" } },
+        { "zh-HK-HiuGaaiNeural",           { L"晓佳 联网 - 粤语女声", L"晓佳 粤语" } },
+        { "zh-HK-HiuMaanNeural",           { L"晓敏 联网 - 粤语女声", L"晓敏 粤语" } },
+        { "zh-HK-WanLungNeural",           { L"韵龙 联网 - 粤语男声", L"韵龙 粤语" } },
+        { "zh-TW-HsiaoChenNeural",         { L"晓辰 联网 - 台湾普通话女声", L"晓辰 台普" } },
+        { "zh-TW-HsiaoYuNeural",           { L"晓雨 联网 - 台湾普通话女声", L"晓雨 台普" } },
+        { "zh-TW-YunJheNeural",            { L"云哲 联网 - 台湾普通话男声", L"云哲 台普" } },
+    };
+    return m;
+}
 
 
 // CVoiceTokenEnumerator
@@ -345,6 +382,16 @@ static std::shared_ptr<DataKeyData> MakeLocalVoiceToken(
     // Make the shortName like "en-US-AriaNeural" because local voices do not have a short name
     std::string shortName = voiceInfo.Locale + '-' + std::move(baseName) + "Neural";
 
+    // === STT: 仅保留中文 voice，并把名字替换为中文友好名 ===
+    {
+        const auto& zhMap = GetSttLocalZhMap();
+        auto it = zhMap.find(shortName);
+        if (it == zhMap.end())
+            return {};   // 非映射表内的 voice 全部丢弃
+        friendlyName = it->second.longName;
+        shortFriendlyName = it->second.shortName;
+    }
+
     return std::shared_ptr<DataKeyData>(new DataKeyData {
         .path = name,
         .values = {
@@ -560,6 +607,17 @@ static std::shared_ptr<DataKeyData> MakeEdgeVoiceToken(
     std::wstring friendlyName = UTF8ToWString(json.at("FriendlyName"));
     std::wstring shortFriendlyName = friendlyName;
     TrimVoiceName(shortFriendlyName);
+
+    // === STT: 仅保留中文 Edge voice，并替换为中文友好名 ===
+    {
+        const auto& zhMap = GetSttEdgeZhMap();
+        const std::string& shortNameUtf8 = json.at("ShortName").get_ref<const std::string&>();
+        auto it = zhMap.find(shortNameUtf8);
+        if (it == zhMap.end())
+            return {};
+        friendlyName = it->second.longName;
+        shortFriendlyName = it->second.shortName;
+    }
 
     std::wstring regName = L"Edge-" + shortName; // registry key name format: Edge-en-US-AriaNeural
 

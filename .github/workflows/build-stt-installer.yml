@@ -1,0 +1,170 @@
+name: Build STT Installer
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'NaturalVoiceSAPIAdapter/**'
+      - 'stt_installer/**'
+      - '.github/workflows/build-stt-installer.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BUILD_CONFIGURATION: Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # ---- 编译依赖：AzureSpeechSDKShim (x86 + x64) ----
+      - name: Build AzureSpeechSDKShim x64
+        run: |
+          nuget restore AzureSpeechSDKShim
+          msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=x64 /p:OutDir=${{github.workspace}}\out\x64\ AzureSpeechSDKShim
+        shell: cmd
+
+      - name: Build AzureSpeechSDKShim x86
+        run: |
+          nuget restore AzureSpeechSDKShim
+          msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=x86 /p:OutDir=${{github.workspace}}\out\x86\ AzureSpeechSDKShim
+        shell: cmd
+
+      # ---- 主 DLL：NaturalVoiceSAPIAdapter (x86 + x64) ----
+      - name: Restore NuGet for main project
+        run: nuget restore NaturalVoiceSAPIAdapter -SolutionDirectory .
+        shell: cmd
+
+      - name: Build NaturalVoiceSAPIAdapter x64
+        run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=x64 /p:OutDir=${{github.workspace}}\out\x64\ . /t:NaturalVoiceSAPIAdapter
+        shell: cmd
+
+      - name: Build NaturalVoiceSAPIAdapter x86
+        run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=x86 /p:OutDir=${{github.workspace}}\out\x86\ . /t:NaturalVoiceSAPIAdapter
+        shell: cmd
+
+      # ---- 清理 out 目录的多余 DLL（按上游做法）----
+      - name: Trim out\x64 to runtime DLLs only
+        shell: pwsh
+        working-directory: ${{github.workspace}}\out\x64
+        run: |
+          $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -property installationPath -latest
+          $msvcpath = (Get-ChildItem "$vspath\VC\Tools\MSVC" | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          $dumpbinpath = "$msvcpath\bin\Hostx64\x64\dumpbin.exe"
+          $dlls = & $dumpbinpath /dependents NaturalVoiceSAPIAdapter.dll Microsoft.CognitiveServices.*.dll `
+            | ? { $_ -like "    *.dll" } | % { $_.Trim() } | Select-Object -Unique
+          $dlls += "NaturalVoiceSAPIAdapter.dll", "Microsoft.CognitiveServices.*.dll"
+          Remove-Item * -Include *.dll -Exclude $dlls -ErrorAction SilentlyContinue
+          Remove-Item Microsoft.CognitiveServices.Speech.extension.codec.dll -ErrorAction SilentlyContinue
+          Copy-Item -Path "$env:SystemRoot\System32\ucrtbase.dll" -Destination . -Force
+          Get-ChildItem . | Format-Table -AutoSize
+          exit 0
+
+      - name: Trim out\x86 to runtime DLLs only
+        shell: pwsh
+        working-directory: ${{github.workspace}}\out\x86
+        run: |
+          $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -property installationPath -latest
+          $msvcpath = (Get-ChildItem "$vspath\VC\Tools\MSVC" | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          $dumpbinpath = "$msvcpath\bin\Hostx86\x86\dumpbin.exe"
+          $dlls = & $dumpbinpath /dependents NaturalVoiceSAPIAdapter.dll Microsoft.CognitiveServices.*.dll `
+            | ? { $_ -like "    *.dll" } | % { $_.Trim() } | Select-Object -Unique
+          $dlls += "NaturalVoiceSAPIAdapter.dll", "Microsoft.CognitiveServices.*.dll"
+          Remove-Item * -Include *.dll -Exclude $dlls -ErrorAction SilentlyContinue
+          Remove-Item Microsoft.CognitiveServices.Speech.extension.codec.dll -ErrorAction SilentlyContinue
+          Copy-Item -Path "$env:SystemRoot\SysWOW64\ucrtbase.dll" -Destination . -Force
+          Get-ChildItem . | Format-Table -AutoSize
+          exit 0
+
+      # ---- 准备 payload 目录 ----
+      - name: Stage payload (DLLs)
+        shell: pwsh
+        run: |
+          $payload = "stt_installer\payload"
+          New-Item -ItemType Directory -Force -Path $payload\NaturalVoiceSAPIAdapter\x64 | Out-Null
+          New-Item -ItemType Directory -Force -Path $payload\NaturalVoiceSAPIAdapter\x86 | Out-Null
+          New-Item -ItemType Directory -Force -Path $payload\TTS_VOICE | Out-Null
+          Copy-Item -Recurse -Force "out\x64\*.dll" "$payload\NaturalVoiceSAPIAdapter\x64\"
+          Copy-Item -Recurse -Force "out\x86\*.dll" "$payload\NaturalVoiceSAPIAdapter\x86\"
+          Get-ChildItem -Recurse $payload | Format-Table FullName, Length -AutoSize
+
+      # ---- 下载 Xiaoxiao MSIX 并解压 ----
+      - name: Download Xiaoxiao MSIX (with retries + fallback)
+        shell: pwsh
+        run: |
+          $urls = @(
+            "https://dl.nvdacn.com/NVDA-Addons/TTS/NaturalVoices/MicrosoftWindows.Voice.zh-CN.Xiaoxiao.1_1.0.9.0_x64__cw5n1h2txyewy.Msix",
+            "https://github.com/gexgd0419/NaturalVoiceSAPIAdapter/releases/download/v0.13.0/MicrosoftWindows.Voice.zh-CN.Xiaoxiao.1_1.0.9.0_x64__cw5n1h2txyewy.Msix"
+          )
+          $ok = $false
+          foreach ($u in $urls) {
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                Write-Host "Download attempt $i from $u"
+                Invoke-WebRequest -Uri $u -OutFile xiaoxiao.msix -UseBasicParsing -TimeoutSec 300
+                if ((Get-Item xiaoxiao.msix).Length -gt 1000000) { $ok = $true; break }
+              } catch {
+                Write-Host "Failed: $_"
+                Start-Sleep -Seconds 8
+              }
+            }
+            if ($ok) { break }
+          }
+          if (-not $ok) { throw "All MSIX download URLs failed" }
+          Get-Item xiaoxiao.msix | Format-List Name, Length
+
+      - name: Extract MSIX into payload
+        shell: pwsh
+        run: |
+          $voiceDir = "stt_installer\payload\TTS_VOICE\MicrosoftWindows.Voice.zh-CN.Xiaoxiao.1_1.0.9.0_x64__cw5n1h2txyewy"
+          New-Item -ItemType Directory -Force -Path $voiceDir | Out-Null
+          # MSIX 是 zip 格式，Expand-Archive 需要 .zip 后缀
+          Copy-Item xiaoxiao.msix xiaoxiao.zip -Force
+          Expand-Archive -Path xiaoxiao.zip -DestinationPath $voiceDir -Force
+          # 删 AppX 元数据子目录，对 voice 引擎无用，缩体积
+          Remove-Item "$voiceDir\AppxMetadata" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "$voiceDir\AppxBlockMap.xml" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$voiceDir\AppxSignature.p7x" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$voiceDir\[Content_Types].xml" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$voiceDir\AppxManifest.xml" -Force -ErrorAction SilentlyContinue
+          # 验证 Tokens.xml 存在（NaturalVoiceSAPIAdapter 用它判定 voice 文件夹）
+          $tokens = Get-ChildItem -Path $voiceDir -Recurse -Filter "Tokens.xml" -ErrorAction SilentlyContinue
+          if (-not $tokens) { throw "MSIX 解压后未找到 Tokens.xml，目录结构异常" }
+          $tokens | Format-List FullName
+
+      # ---- 安装 Inno Setup ----
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+        shell: cmd
+
+      # ---- 编译 .iss ----
+      - name: Compile Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc stt_installer\stt_natural.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
+          Get-ChildItem stt_installer\output | Format-Table -AutoSize
+
+      - name: Upload Setup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: STT-NaturalVoice-Setup-v7
+          path: stt_installer/output/STT-NaturalVoice-Setup-v7.exe
+          retention-days: 30
+          if-no-files-found: error
